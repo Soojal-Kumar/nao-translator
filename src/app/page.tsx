@@ -69,8 +69,7 @@ declare global {
   }
 }
 
-// --- FIX: Moved STORAGE_KEYS outside the component ---
-// This makes it a true constant and resolves several useEffect dependency warnings.
+// Moved STORAGE_KEYS outside the component
 const STORAGE_KEYS = {
   MESSAGES: "nao-translator-messages",
   FROM_LANG: "nao-translator-from-lang",
@@ -89,14 +88,13 @@ export default function HomePage() {
     message: string;
   } | null>(null);
 
-  // --- FIX: Typed the ref correctly ---
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
-  const toastTimeoutRef = useRef<NodeJS.Timeout>();
+  // --- FIX: useRef requires an initial value. Changed to null. ---
+  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // --- FIX: Wrapped in useCallback for stable reference in useEffect ---
   const showToastMessage = useCallback(
     (type: "save" | "clear", message: string) => {
       if (toastTimeoutRef.current) {
@@ -136,7 +134,7 @@ export default function HomePage() {
         console.warn("Failed to load from session storage:", error);
       }
     }
-  }, []); // This is correct, runs only once on mount.
+  }, []);
 
   // Save messages to session storage whenever they change
   useEffect(() => {
@@ -186,7 +184,6 @@ export default function HomePage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // --- FIX: Wrapped in useCallback for stable reference in other hooks ---
   const getTranslation = useCallback(
     async (text: string, wasRecorded = false, audioBlob?: Blob) => {
       if (!text) return;
@@ -224,7 +221,6 @@ export default function HomePage() {
       return { name: "unknown", isBrave: false };
 
     const userAgent = navigator.userAgent;
-    // --- FIX: No 'any' needed due to updated Navigator interface ---
     const isBrave =
       !!navigator.brave && typeof navigator.brave.isBrave === "function";
 
@@ -278,7 +274,6 @@ export default function HomePage() {
       console.log("Speech recognition started");
     };
 
-    // --- FIX: Used the strictly typed event ---
     recognition.onresult = (event: SpeechRecognitionEvent) => {
       let finalTranscript = "";
       let interim = "";
@@ -324,7 +319,6 @@ export default function HomePage() {
       }
     };
 
-    // --- FIX: Used the strictly typed event ---
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
       console.error("Speech recognition error:", event.error);
       const browserName = browserInfo.name;
@@ -364,7 +358,8 @@ export default function HomePage() {
                 if (isListening && recognitionRef.current) {
                   try {
                     recognitionRef.current.start();
-                  } catch (error) {
+                  } catch (_error) {
+                    // --- FIX: Prefixed unused variable with underscore ---
                     setIsListening(false);
                   }
                 }
@@ -394,7 +389,6 @@ export default function HomePage() {
     };
 
     recognitionRef.current = recognition;
-    // --- FIX: Added missing dependencies to satisfy the linter ---
   }, [fromLanguage, getTranslation, isListening]);
 
   // Initialize Media Recorder for audio recording
