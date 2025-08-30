@@ -4,7 +4,7 @@
 import { Header } from "./components/Header";
 import { Controls } from "./components/Controls";
 import { MessageList } from "./components/MessageList";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
 export type Message = {
   id: number;
@@ -17,14 +17,65 @@ export type Message = {
   recordedAudio?: Blob; // Store the actual recorded audio
 };
 
-// Extend Window interface for speech recognition
+// --- FIX: Define strict types for the Web Speech API to avoid 'any' ---
+interface SpeechRecognitionEvent {
+  resultIndex: number;
+  results: {
+    isFinal: boolean;
+    [key: number]: {
+      transcript: string;
+    };
+  }[];
+}
+
+interface SpeechRecognitionErrorEvent {
+  error:
+    | "no-speech"
+    | "aborted"
+    | "audio-capture"
+    | "network"
+    | "not-allowed"
+    | "service-not-allowed"
+    | "bad-grammar"
+    | "language-not-supported";
+  message: string;
+}
+
+interface SpeechRecognition {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  maxAlternatives: number;
+  start: () => void;
+  stop: () => void;
+  onstart: () => void;
+  onresult: (event: SpeechRecognitionEvent) => void;
+  onend: () => void;
+  onerror: (event: SpeechRecognitionErrorEvent) => void;
+}
+
+// Extend Window and Navigator interfaces for speech recognition and Brave detection
 declare global {
   interface Window {
-    SpeechRecognition: any;
-    webkitSpeechRecognition: any;
+    SpeechRecognition: new () => SpeechRecognition;
+    webkitSpeechRecognition: new () => SpeechRecognition;
     gc?: () => void;
   }
+  // For Brave browser detection
+  interface Navigator {
+    brave?: {
+      isBrave: () => Promise<boolean>;
+    };
+  }
 }
+
+// --- FIX: Moved STORAGE_KEYS outside the component ---
+// This makes it a true constant and resolves several useEffect dependency warnings.
+const STORAGE_KEYS = {
+  MESSAGES: "nao-translator-messages",
+  FROM_LANG: "nao-translator-from-lang",
+  TO_LANG: "nao-translator-to-lang",
+};
 
 export default function HomePage() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -38,51 +89,44 @@ export default function HomePage() {
     message: string;
   } | null>(null);
 
-  const recognitionRef = useRef<any>(null);
+  // --- FIX: Typed the ref correctly ---
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const toastTimeoutRef = useRef<NodeJS.Timeout>();
 
-  // Show toast notification
-  const showToastMessage = (type: "save" | "clear", message: string) => {
-    if (toastTimeoutRef.current) {
-      clearTimeout(toastTimeoutRef.current);
-    }
+  // --- FIX: Wrapped in useCallback for stable reference in useEffect ---
+  const showToastMessage = useCallback(
+    (type: "save" | "clear", message: string) => {
+      if (toastTimeoutRef.current) {
+        clearTimeout(toastTimeoutRef.current);
+      }
 
-    setShowToast({ type, message });
-    toastTimeoutRef.current = setTimeout(() => {
-      setShowToast(null);
-    }, 3000);
-  };
-
-  // Session storage keys
-  const STORAGE_KEYS = {
-    MESSAGES: "nao-translator-messages",
-    FROM_LANG: "nao-translator-from-lang",
-    TO_LANG: "nao-translator-to-lang",
-  };
+      setShowToast({ type, message });
+      toastTimeoutRef.current = setTimeout(() => {
+        setShowToast(null);
+      }, 3000);
+    },
+    []
+  );
 
   // Handle client-side mounting and load from session storage
   useEffect(() => {
     setIsMounted(true);
 
-    // Load data from session storage
     if (typeof window !== "undefined") {
       try {
-        // Load messages
         const savedMessages = sessionStorage.getItem(STORAGE_KEYS.MESSAGES);
         if (savedMessages) {
           const parsedMessages: Message[] = JSON.parse(savedMessages);
-          // Filter out audio blobs since they can't be serialized
           const messagesWithoutAudio = parsedMessages.map((msg) => ({
             ...msg,
-            recordedAudio: undefined, // Audio will be lost on refresh
+            recordedAudio: undefined,
           }));
           setMessages(messagesWithoutAudio);
         }
 
-        // Load language preferences
         const savedFromLang = sessionStorage.getItem(STORAGE_KEYS.FROM_LANG);
         const savedToLang = sessionStorage.getItem(STORAGE_KEYS.TO_LANG);
 
@@ -92,23 +136,21 @@ export default function HomePage() {
         console.warn("Failed to load from session storage:", error);
       }
     }
-  }, []);
+  }, []); // This is correct, runs only once on mount.
 
   // Save messages to session storage whenever they change
   useEffect(() => {
     if (isMounted && typeof window !== "undefined") {
       try {
-        // Save messages (excluding audio blobs)
         const messagesToSave = messages.map((msg) => ({
           ...msg,
-          recordedAudio: undefined, // Don't save audio blobs
+          recordedAudio: undefined,
         }));
         sessionStorage.setItem(
           STORAGE_KEYS.MESSAGES,
           JSON.stringify(messagesToSave)
         );
 
-        // Show save notification only when there are messages
         if (messages.length > 0) {
           showToastMessage("save", "Conversation auto-saved");
         }
@@ -116,7 +158,7 @@ export default function HomePage() {
         console.warn("Failed to save messages to session storage:", error);
       }
     }
-  }, [messages, isMounted]);
+  }, [messages, isMounted, showToastMessage]);
 
   // Save language preferences to session storage
   useEffect(() => {
@@ -144,38 +186,37 @@ export default function HomePage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Translation function
-  const getTranslation = async (
-    text: string,
-    wasRecorded = false,
-    audioBlob?: Blob
-  ) => {
-    if (!text) return;
-    try {
-      const response = await fetch("/api/translate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, fromLanguage, toLanguage }),
-      });
-      const data = await response.json();
+  // --- FIX: Wrapped in useCallback for stable reference in other hooks ---
+  const getTranslation = useCallback(
+    async (text: string, wasRecorded = false, audioBlob?: Blob) => {
+      if (!text) return;
+      try {
+        const response = await fetch("/api/translate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, fromLanguage, toLanguage }),
+        });
+        const data = await response.json();
 
-      if (data.translatedText) {
-        const newMessage: Message = {
-          id: Date.now(),
-          originalText: text,
-          translatedText: data.translatedText,
-          originalLang: fromLanguage,
-          translatedLang: toLanguage,
-          speakerSide: fromLanguage.startsWith("en") ? "right" : "left",
-          wasRecorded,
-          recordedAudio: audioBlob,
-        };
-        setMessages((prev) => [...prev, newMessage]);
+        if (data.translatedText) {
+          const newMessage: Message = {
+            id: Date.now(),
+            originalText: text,
+            translatedText: data.translatedText,
+            originalLang: fromLanguage,
+            translatedLang: toLanguage,
+            speakerSide: fromLanguage.startsWith("en") ? "right" : "left",
+            wasRecorded,
+            recordedAudio: audioBlob,
+          };
+          setMessages((prev) => [...prev, newMessage]);
+        }
+      } catch (error) {
+        console.error("Failed to fetch translation:", error);
       }
-    } catch (error) {
-      console.error("Failed to fetch translation:", error);
-    }
-  };
+    },
+    [fromLanguage, toLanguage]
+  );
 
   // Browser detection helper
   const getBrowserInfo = () => {
@@ -183,9 +224,9 @@ export default function HomePage() {
       return { name: "unknown", isBrave: false };
 
     const userAgent = navigator.userAgent;
+    // --- FIX: No 'any' needed due to updated Navigator interface ---
     const isBrave =
-      !!(navigator as any).brave &&
-      typeof (navigator as any).brave.isBrave === "function";
+      !!navigator.brave && typeof navigator.brave.isBrave === "function";
 
     return {
       name: isBrave
@@ -205,7 +246,6 @@ export default function HomePage() {
 
   // Initialize Speech Recognition and Media Recorder
   useEffect(() => {
-    // Only initialize on client side
     if (typeof window === "undefined") return;
 
     const browserInfo = getBrowserInfo();
@@ -217,7 +257,6 @@ export default function HomePage() {
       return;
     }
 
-    // Special handling for Brave browser
     if (browserInfo.isBrave) {
       console.warn(
         "Brave browser detected. Speech recognition may be limited due to privacy settings."
@@ -230,17 +269,17 @@ export default function HomePage() {
     recognition.lang = fromLanguage;
     recognition.maxAlternatives = 1;
 
-    // Brave-specific settings
     if (browserInfo.isBrave) {
-      recognition.continuous = false; // Brave works better with non-continuous
-      recognition.interimResults = false; // Disable interim results for Brave
+      recognition.continuous = false;
+      recognition.interimResults = false;
     }
 
     recognition.onstart = () => {
       console.log("Speech recognition started");
     };
 
-    recognition.onresult = (event: any) => {
+    // --- FIX: Used the strictly typed event ---
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
       let finalTranscript = "";
       let interim = "";
 
@@ -249,7 +288,6 @@ export default function HomePage() {
         if (event.results[i].isFinal) {
           finalTranscript += transcript;
         } else {
-          // Only use interim results if not Brave
           if (!browserInfo.isBrave) {
             interim += transcript;
           }
@@ -270,7 +308,6 @@ export default function HomePage() {
     recognition.onend = () => {
       console.log("Speech recognition ended");
       if (isListening) {
-        // Restart recognition if still listening (but with delay for Brave)
         const restartDelay = browserInfo.isBrave ? 500 : 100;
         setTimeout(() => {
           if (isListening && recognitionRef.current) {
@@ -287,9 +324,9 @@ export default function HomePage() {
       }
     };
 
-    recognition.onerror = (event: any) => {
+    // --- FIX: Used the strictly typed event ---
+    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
       console.error("Speech recognition error:", event.error);
-
       const browserName = browserInfo.name;
 
       switch (event.error) {
@@ -322,7 +359,6 @@ export default function HomePage() {
         case "no-speech":
           console.warn("No speech detected");
           if (browserInfo.isBrave) {
-            // In Brave, restart immediately on no-speech
             if (isListening) {
               setTimeout(() => {
                 if (isListening && recognitionRef.current) {
@@ -358,7 +394,8 @@ export default function HomePage() {
     };
 
     recognitionRef.current = recognition;
-  }, [fromLanguage]);
+    // --- FIX: Added missing dependencies to satisfy the linter ---
+  }, [fromLanguage, getTranslation, isListening]);
 
   // Initialize Media Recorder for audio recording
   const initMediaRecorder = async () => {
@@ -389,15 +426,21 @@ export default function HomePage() {
         });
         audioChunksRef.current = [];
 
-        // Store the audio blob for later playback
-        if (messages.length > 0) {
-          const lastMessage = messages[messages.length - 1];
-          if (lastMessage.wasRecorded) {
-            lastMessage.recordedAudio = audioBlob;
+        setMessages((currentMessages) => {
+          if (currentMessages.length > 0) {
+            const lastMessage = currentMessages[currentMessages.length - 1];
+            if (lastMessage.wasRecorded && !lastMessage.recordedAudio) {
+              const updatedMessages = [...currentMessages];
+              updatedMessages[updatedMessages.length - 1] = {
+                ...lastMessage,
+                recordedAudio: audioBlob,
+              };
+              return updatedMessages;
+            }
           }
-        }
+          return currentMessages;
+        });
 
-        // Stop the microphone stream
         stream.getTracks().forEach((track) => track.stop());
       };
 
@@ -413,7 +456,6 @@ export default function HomePage() {
   // Toggle listening state for the microphone
   const handleListen = async () => {
     if (isListening) {
-      // Stop listening
       if (recognitionRef.current) {
         recognitionRef.current.stop();
       }
@@ -426,7 +468,6 @@ export default function HomePage() {
       setIsListening(false);
       setInterimTranscript("");
     } else {
-      // Check browser compatibility
       const browserInfo = getBrowserInfo();
       const SpeechRecognition =
         window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -438,7 +479,6 @@ export default function HomePage() {
         return;
       }
 
-      // Show Brave-specific warning
       if (browserInfo.isBrave) {
         const userConfirmed = confirm(
           `You're using Brave browser. Speech recognition may not work due to privacy settings.\n\n` +
@@ -448,20 +488,16 @@ export default function HomePage() {
         if (!userConfirmed) return;
       }
 
-      // Start listening
       setInterimTranscript("");
       setIsListening(true);
 
       try {
-        // Initialize and start media recorder (skip for Brave if it causes issues)
         if (!browserInfo.isBrave) {
           const mediaRecorder = await initMediaRecorder();
           if (mediaRecorder) {
             mediaRecorder.start(1000);
           }
         }
-
-        // Start speech recognition with retry logic
         if (recognitionRef.current) {
           recognitionRef.current.lang = fromLanguage;
           recognitionRef.current.start();
@@ -485,8 +521,6 @@ export default function HomePage() {
   const handlePlayAudio = (text: string, lang: string, isRecorded = false) => {
     if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel();
-
-      // For recorded messages, try to find and play the original audio first
       if (isRecorded) {
         const message = messages.find(
           (m) =>
@@ -495,21 +529,15 @@ export default function HomePage() {
         );
 
         if (message?.recordedAudio && message.originalText === text) {
-          // Play the original recorded audio
           const audioUrl = URL.createObjectURL(message.recordedAudio);
           const audio = new Audio(audioUrl);
           audio.play().catch(() => {
-            // Fallback to TTS if recorded audio fails
             playTTS(text, lang);
           });
-
-          // Clean up the object URL after playing
           audio.onended = () => URL.revokeObjectURL(audioUrl);
           return;
         }
       }
-
-      // Use TTS for non-recorded messages or as fallback
       playTTS(text, lang);
     }
   };
@@ -518,20 +546,15 @@ export default function HomePage() {
   const playTTS = (text: string, lang: string) => {
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = lang;
-
-    // Make TTS sound more robotic for translated text
     utterance.rate = 0.9;
     utterance.pitch = 0.8;
-
     window.speechSynthesis.speak(utterance);
   };
 
-  // Clear chat with immediate data deletion from both memory and session storage
+  // Clear chat with immediate data deletion
   const clearChat = () => {
-    // Clear messages immediately from state
     setMessages([]);
 
-    // Clear session storage immediately for privacy
     if (typeof window !== "undefined") {
       try {
         sessionStorage.removeItem(STORAGE_KEYS.MESSAGES);
@@ -542,12 +565,10 @@ export default function HomePage() {
       }
     }
 
-    // Clear any ongoing speech synthesis
     if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
 
-    // Stop any ongoing recording/listening
     if (isListening) {
       if (recognitionRef.current) {
         recognitionRef.current.stop();
@@ -562,10 +583,8 @@ export default function HomePage() {
       setInterimTranscript("");
     }
 
-    // Clear audio chunks
     audioChunksRef.current = [];
 
-    // Force garbage collection hint (not guaranteed but helps)
     if (window.gc) {
       window.gc();
     }
@@ -600,7 +619,6 @@ export default function HomePage() {
         />
       )}
 
-      {/* Toast Notification */}
       {showToast && (
         <div
           className={`
